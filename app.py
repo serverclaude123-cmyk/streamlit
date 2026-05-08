@@ -11,52 +11,50 @@ TOPIC = "hive/a"
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
 
+# Use st.session_state for status so it survives the rerun
+if 'conn_log' not in st.session_state:
+    st.session_state.conn_log = "Starting connection..."
 if 'last_received' not in st.session_state:
     st.session_state.last_received = {}
 
-# --- THE FIX: SHARED CONNECTION STATUS ---
-if 'conn_log' not in st.session_state:
-    st.session_state.conn_log = "Initializing..."
-
+# --- CALLBACKS ---
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
-        st.session_state.conn_log = "✅ Connected to HiveMQ"
+        st.session_state.conn_log = "✅ Connected Successfully!"
     else:
-        st.session_state.conn_log = f"❌ Connection Refused (Error Code: {rc})"
+        st.session_state.conn_log = f"❌ Connection Refused (RC: {rc})"
 
 def on_message(client, userdata, msg):
     try:
         raw = msg.payload.decode().strip()
+        # Handle stringified JSON
         if raw.startswith('"') and raw.endswith('"'):
             raw = raw[1:-1]
         st.session_state.last_received = json.loads(raw)
-    except:
-        st.session_state.last_received = {"Raw": msg.payload.decode()}
-
-@st.cache_resource
-def start_mqtt():
-    # Use version 2 of the callback API
-    c = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-    c.username_pw_set(USER, PASS)
-    c.tls_set() # Required for HiveMQ Cloud Port 8883
-    c.on_connect = on_connect
-    c.on_message = on_message
-    
-    try:
-        # 60 second keepalive to prevent the cloud from dropping the connection
-        c.connect(BROKER, 8883, keepalive=60)
-        c.subscribe(TOPIC)
-        c.loop_start()
-        return c
     except Exception as e:
-        st.session_state.conn_log = f"⚠️ Network Error: {str(e)}"
-        return None
+        st.session_state.last_received = {"Raw Data": msg.payload.decode()}
 
-client = start_mqtt()
+# --- CONNECTION LOGIC (NO CACHE FOR DEBUGGING) ---
+if 'mqtt_client' not in st.session_state:
+    try:
+        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+        client.username_pw_set(USER, PASS)
+        client.tls_set() # Mandatory for HiveMQ Cloud
+        client.on_connect = on_connect
+        client.on_message = on_message
+        
+        # Connect and start background loop
+        client.connect(BROKER, 8883, keepalive=60)
+        client.subscribe(TOPIC)
+        client.loop_start()
+        
+        st.session_state.mqtt_client = client
+    except Exception as e:
+        st.session_state.conn_log = f"⚠️ Setup Error: {str(e)}"
 
 # --- UI ---
 st.title("🏭 Factory Monitor")
-st.info(f"Connection Status: {st.session_state.conn_log}")
+st.info(f"Status: {st.session_state.conn_log}")
 
 if st.session_state.last_received:
     data = st.session_state.last_received
@@ -64,7 +62,8 @@ if st.session_state.last_received:
     for i, (k, v) in enumerate(data.items()):
         cols[i].metric(label=k.upper(), value=v)
 else:
-    st.warning("No data package received on 'hive/a' yet.")
+    st.warning("Connected, but waiting for data on 'hive/a'...")
 
+# Fast refresh to catch the 'on_connect' update
 time.sleep(2)
 st.rerun()
