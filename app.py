@@ -4,38 +4,35 @@ import json
 import time
 
 # --- CONFIG ---
-# Best Practice: Use st.secrets if deploying to the cloud
 BROKER = st.secrets["BROKER"]
-PORT = 8883
 USER = st.secrets["USER"]
 PASS = st.secrets["PASS"]
 TOPIC = "hive/a"
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
 
-# 1. Shared Storage (Using a list to avoid some SessionState quirks)
-if 'data_store' not in st.session_state:
-    st.session_state.data_store = {"payload": {}}
+# 1. GLOBAL STORAGE (The Bridge)
+# This lives outside of Streamlit's refresh cycle
+if 'global_metrics' not in globals():
+    globals()['global_metrics'] = {}
 
-# 2. Advanced Callback
+# 2. THE CALLBACK (Writes to Global)
 def on_message(client, userdata, msg):
     try:
-        # Clean the string (remove any accidental quotes at start/end)
         raw_payload = msg.payload.decode().strip()
+        # Remove surrounding quotes if Node-RED sent a "stringified" string
         if raw_payload.startswith('"') and raw_payload.endswith('"'):
             raw_payload = raw_payload[1:-1]
         
-        # Parse JSON
         parsed_data = json.loads(raw_payload)
-        st.session_state.data_store["payload"] = parsed_data
+        globals()['global_metrics'] = parsed_data
     except Exception as e:
-        # If it's not JSON, just show the raw string
-        st.session_state.data_store["payload"] = {"Raw Message": msg.payload.decode()}
+        globals()['global_metrics'] = {"Error": str(e), "Raw": msg.payload.decode()}
 
-# 3. Singleton MQTT Client
+# 3. THE CLIENT (Cached Singleton)
 @st.cache_resource
-def init_mqtt(_shared_dict):
-    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, userdata=_shared_dict)
+def init_mqtt():
+    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     client.username_pw_set(USER, PASS)
     client.tls_set()
     client.on_message = on_message
@@ -44,25 +41,26 @@ def init_mqtt(_shared_dict):
     client.loop_start()
     return client
 
-mqtt_conn = init_mqtt(st.session_state.data_store)
+mqtt_conn = init_mqtt()
 
-# 4. Dashboard UI
+# 4. THE UI (Reads from Global)
 st.title("🏭 Real-Time Factory Monitor")
-display_data = st.session_state.data_store.get("payload", {})
+
+display_data = globals()['global_metrics']
 
 if display_data:
-    # Auto-generate boxes for Current, Voltage, and SABDA/IR
-    cols = st.columns(len(display_data))
-    for i, (key, val) in enumerate(display_data.items()):
-        with cols[i]:
-            # Formatting numbers for readability
-            if isinstance(val, (int, float)):
-                st.metric(label=key.replace("_", " ").upper(), value=f"{val:,.2f}")
-            else:
+    # Handle both Dictionary and single values
+    if isinstance(display_data, dict):
+        cols = st.columns(len(display_data))
+        for i, (key, val) in enumerate(display_data.items()):
+            with cols[i]:
                 st.metric(label=key.upper(), value=val)
+    else:
+        st.metric(label="LATEST DATA", value=display_data)
 else:
-    st.info("📡 Connecting to HiveMQ... Please trigger Node-RED.")
+    st.info("📡 Connected. Waiting for JSON package from Node-RED...")
+    st.caption("Tip: Ensure your Node-RED Join node is sending a single JSON object.")
 
-# 5. Refresh Logic
+# 5. REFRESH
 time.sleep(2)
 st.rerun()
