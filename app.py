@@ -1,29 +1,35 @@
 import streamlit as st
 import paho.mqtt.client as mqtt
+import json
 import time
 
 # --- CONFIG ---
-BROKER = "3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"
+# Best Practice: Use st.secrets if deploying to the cloud
+BROKER = st.secrets["3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"]
 PORT = 8883
-USER = "user2"
-PASS = "ServerClaude#1"
+USER = st.secrets["user2"]
+PASS = st.secrets["ServerClaude#1"]
 TOPIC = "hive/a"
 
-# 1. THREAD-SAFE STORAGE
-# We use a simple dictionary to hold the value outside the Streamlit state
+st.set_page_config(page_title="Industrial Monitor", layout="wide")
+st.title("🏭 Real-Time Industrial Dashboard")
+
+# 1. Initialize Thread-Safe Storage
+# We use a nested dictionary to ensure 'data' always exists
 if 'shared_data' not in st.session_state:
-    st.session_state.shared_data = {"val": "Waiting for data..."}
+    st.session_state.shared_data = {"data": {}}
 
-st.set_page_config(page_title="Modbus Monitor", layout="centered")
-st.title("🔋 Live Modbus Data")
-
-# 2. THE CALLBACK
+# 2. Callback with JSON Parsing
 def on_message(client, userdata, msg):
-    # Store the data in the dictionary
-    # We use the 'userdata' to pass our dictionary into the thread safely
-    userdata["val"] = msg.payload.decode()
+    try:
+        # Parse the JSON string from Node-RED back into a Python Dictionary
+        payload = json.loads(msg.payload.decode())
+        userdata["data"] = payload
+    except Exception as e:
+        # Fallback if the data isn't JSON
+        userdata["data"] = {"Raw Message": msg.payload.decode()}
 
-# 3. CLIENT SETUP (Cached to prevent reconnect loops)
+# 3. Cached MQTT Client
 @st.cache_resource
 def setup_mqtt(_data_dict):
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, userdata=_data_dict)
@@ -35,17 +41,24 @@ def setup_mqtt(_data_dict):
     client.loop_start()
     return client
 
-# Initialize the client and pass our shared dictionary
 mqtt_client = setup_mqtt(st.session_state.shared_data)
 
-# 4. UI DISPLAY
-# Pull the value from our shared dictionary
-current_value = st.session_state.shared_data["val"]
-st.metric(label="Modbus Reading", value=current_value)
+# 4. Safe UI Rendering
+# Use .get() to avoid KeyErrors if the dictionary is temporarily empty
+current_dict = st.session_state.shared_data.get("data", {})
+
+if current_dict:
+    # This creates a grid of metrics automatically based on your JSON keys
+    cols = st.columns(min(len(current_dict), 4)) 
+    for index, (label, value) in enumerate(current_dict.items()):
+        with cols[index % len(cols)]:
+            st.metric(label=label.upper(), value=value)
+else:
+    st.warning("📡 Waiting for synchronized data package from Node-RED...")
 
 st.divider()
-st.caption(f"Status: Connected to {TOPIC}")
+st.caption(f"Listening to: {TOPIC} | System Time: {time.strftime('%H:%M:%S')}")
 
-# 5. REFRESH LOOP
+# 5. Fast Refresh
 time.sleep(1)
 st.rerun()
