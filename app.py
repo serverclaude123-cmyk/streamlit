@@ -11,56 +11,65 @@ TOPIC = "hive/a"
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
 
-# 1. GLOBAL STORAGE (The Bridge)
-# This lives outside of Streamlit's refresh cycle
-if 'global_metrics' not in globals():
-    globals()['global_metrics'] = {}
+# 1. Persistent Storage (Cross-run storage)
+if 'last_received' not in st.session_state:
+    st.session_state.last_received = {}
+if 'conn_status' not in st.session_state:
+    st.session_state.conn_status = "Disconnected"
 
-# 2. THE CALLBACK (Writes to Global)
+# 2. Optimized Callback
 def on_message(client, userdata, msg):
     try:
-        raw_payload = msg.payload.decode().strip()
-        # Remove surrounding quotes if Node-RED sent a "stringified" string
-        if raw_payload.startswith('"') and raw_payload.endswith('"'):
-            raw_payload = raw_payload[1:-1]
+        raw = msg.payload.decode().strip()
+        # Clean up double-encoded JSON if necessary
+        if raw.startswith('"') and raw.endswith('"'):
+            raw = raw[1:-1]
         
-        parsed_data = json.loads(raw_payload)
-        globals()['global_metrics'] = parsed_data
+        data = json.loads(raw)
+        # Update session state directly
+        st.session_state.last_received = data
     except Exception as e:
-        globals()['global_metrics'] = {"Error": str(e), "Raw": msg.payload.decode()}
+        st.session_state.last_received = {"Error": str(e), "Raw": msg.payload.decode()}
 
-# 3. THE CLIENT (Cached Singleton)
+def on_connect(client, userdata, flags, rc, properties=None):
+    if rc == 0:
+        st.session_state.conn_status = "✅ Connected to HiveMQ"
+    else:
+        st.session_state.conn_status = f"❌ Connection Failed (Code {rc})"
+
+# 3. Connection Setup
 @st.cache_resource
-def init_mqtt():
+def get_mqtt_client():
     client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     client.username_pw_set(USER, PASS)
     client.tls_set()
+    client.on_connect = on_connect
     client.on_message = on_message
-    client.connect(BROKER, 8883)
-    client.subscribe(TOPIC)
-    client.loop_start()
-    return client
+    
+    try:
+        client.connect(BROKER, 8883, keepalive=60)
+        client.subscribe(TOPIC)
+        client.loop_start()
+        return client
+    except Exception as e:
+        st.error(f"Connect Error: {e}")
+        return None
 
-mqtt_conn = init_mqtt()
+client = get_mqtt_client()
 
-# 4. THE UI (Reads from Global)
-st.title("🏭 Real-Time Factory Monitor")
+# 4. UI Layout
+st.title("🏭 Factory Monitor")
+st.write(f"Status: {st.session_state.conn_status}")
 
-display_data = globals()['global_metrics']
-
-if display_data:
-    # Handle both Dictionary and single values
-    if isinstance(display_data, dict):
-        cols = st.columns(len(display_data))
-        for i, (key, val) in enumerate(display_data.items()):
-            with cols[i]:
-                st.metric(label=key.upper(), value=val)
-    else:
-        st.metric(label="LATEST DATA", value=display_data)
+if st.session_state.last_received:
+    data = st.session_state.last_received
+    cols = st.columns(len(data))
+    for i, (k, v) in enumerate(data.items()):
+        cols[i].metric(label=k.upper(), value=v)
 else:
-    st.info("📡 Connected. Waiting for JSON package from Node-RED...")
-    st.caption("Tip: Ensure your Node-RED Join node is sending a single JSON object.")
+    st.warning("Connected, but no data received yet. Is Node-RED sending to 'hive/a'?")
 
-# 5. REFRESH
-time.sleep(2)
+# 5. Slow down the loop
+# If the loop is too fast, the background thread can't update the UI thread
+time.sleep(3) 
 st.rerun()
