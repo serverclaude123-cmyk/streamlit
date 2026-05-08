@@ -12,53 +12,57 @@ PASS = st.secrets["PASS"]
 TOPIC = "hive/a"
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
-st.title("🏭 Real-Time Industrial Dashboard")
 
-# 1. Initialize Thread-Safe Storage
-# We use a nested dictionary to ensure 'data' always exists
-if 'shared_data' not in st.session_state:
-    st.session_state.shared_data = {"data": {}}
+# 1. Shared Storage (Using a list to avoid some SessionState quirks)
+if 'data_store' not in st.session_state:
+    st.session_state.data_store = {"payload": {}}
 
-# 2. Callback with JSON Parsing
+# 2. Advanced Callback
 def on_message(client, userdata, msg):
     try:
-        # Parse the JSON string from Node-RED back into a Python Dictionary
-        payload = json.loads(msg.payload.decode())
-        userdata["data"] = payload
+        # Clean the string (remove any accidental quotes at start/end)
+        raw_payload = msg.payload.decode().strip()
+        if raw_payload.startswith('"') and raw_payload.endswith('"'):
+            raw_payload = raw_payload[1:-1]
+        
+        # Parse JSON
+        parsed_data = json.loads(raw_payload)
+        st.session_state.data_store["payload"] = parsed_data
     except Exception as e:
-        # Fallback if the data isn't JSON
-        userdata["data"] = {"Raw Message": msg.payload.decode()}
+        # If it's not JSON, just show the raw string
+        st.session_state.data_store["payload"] = {"Raw Message": msg.payload.decode()}
 
-# 3. Cached MQTT Client
+# 3. Singleton MQTT Client
 @st.cache_resource
-def setup_mqtt(_data_dict):
-    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, userdata=_data_dict)
+def init_mqtt(_shared_dict):
+    client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, userdata=_shared_dict)
     client.username_pw_set(USER, PASS)
     client.tls_set()
     client.on_message = on_message
-    client.connect(BROKER, PORT)
+    client.connect(BROKER, 8883)
     client.subscribe(TOPIC)
     client.loop_start()
     return client
 
-mqtt_client = setup_mqtt(st.session_state.shared_data)
+mqtt_conn = init_mqtt(st.session_state.data_store)
 
-# 4. Safe UI Rendering
-# Use .get() to avoid KeyErrors if the dictionary is temporarily empty
-current_dict = st.session_state.shared_data.get("data", {})
+# 4. Dashboard UI
+st.title("🏭 Real-Time Factory Monitor")
+display_data = st.session_state.data_store.get("payload", {})
 
-if current_dict:
-    # This creates a grid of metrics automatically based on your JSON keys
-    cols = st.columns(min(len(current_dict), 4)) 
-    for index, (label, value) in enumerate(current_dict.items()):
-        with cols[index % len(cols)]:
-            st.metric(label=label.upper(), value=value)
+if display_data:
+    # Auto-generate boxes for Current, Voltage, and SABDA/IR
+    cols = st.columns(len(display_data))
+    for i, (key, val) in enumerate(display_data.items()):
+        with cols[i]:
+            # Formatting numbers for readability
+            if isinstance(val, (int, float)):
+                st.metric(label=key.replace("_", " ").upper(), value=f"{val:,.2f}")
+            else:
+                st.metric(label=key.upper(), value=val)
 else:
-    st.warning("📡 Waiting for synchronized data package from Node-RED...")
+    st.info("📡 Connecting to HiveMQ... Please trigger Node-RED.")
 
-st.divider()
-st.caption(f"Listening to: {TOPIC} | System Time: {time.strftime('%H:%M:%S')}")
-
-# 5. Fast Refresh
-time.sleep(1)
+# 5. Refresh Logic
+time.sleep(2)
 st.rerun()
