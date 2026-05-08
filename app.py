@@ -3,67 +3,59 @@ import paho.mqtt.client as mqtt
 import json
 import time
 
-# --- CONFIG ---
-BROKER = st.secrets["BROKER"]
-USER = st.secrets["USER"]
-PASS = st.secrets["PASS"]
-TOPIC = "hive/a"
+# --- PULL CREDENTIALS ---
+try:
+    B = st.secrets["BROKER"]
+    U = st.secrets["USER"]
+    P = st.secrets["PASS"]
+    st.success("✅ Secrets loaded from Streamlit settings")
+except Exception as e:
+    st.error(f"❌ Secrets Error: {e}. Check your Advanced Settings!")
+    st.stop()
 
-st.set_page_config(page_title="Industrial Monitor", layout="wide")
+# --- STATE ---
+if "data" not in st.session_state:
+    st.session_state.data = {}
+if "status" not in st.session_state:
+    st.session_state.status = "Disconnected"
 
-# Use st.session_state for status so it survives the rerun
-if 'conn_log' not in st.session_state:
-    st.session_state.conn_log = "Starting connection..."
-if 'last_received' not in st.session_state:
-    st.session_state.last_received = {}
-
-# --- CALLBACKS ---
-def on_connect(client, userdata, flags, rc, properties=None):
+# --- MQTT HANDLERS ---
+def on_connect(client, userdata, flags, rc, props=None):
     if rc == 0:
-        st.session_state.conn_log = "✅ Connected Successfully!"
+        st.session_state.status = "✅ CONNECTED"
     else:
-        st.session_state.conn_log = f"❌ Connection Refused (RC: {rc})"
+        st.session_state.status = f"❌ FAILED (Code {rc})"
 
 def on_message(client, userdata, msg):
     try:
-        raw = msg.payload.decode().strip()
-        # Handle stringified JSON
-        if raw.startswith('"') and raw.endswith('"'):
-            raw = raw[1:-1]
-        st.session_state.last_received = json.loads(raw)
-    except Exception as e:
-        st.session_state.last_received = {"Raw Data": msg.payload.decode()}
+        st.session_state.data = json.loads(msg.payload.decode())
+    except:
+        st.session_state.data = {"Raw": msg.payload.decode()}
 
-# --- CONNECTION LOGIC (NO CACHE FOR DEBUGGING) ---
-if 'mqtt_client' not in st.session_state:
-    try:
-        client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
-        client.username_pw_set(USER, PASS)
-        client.tls_set() # Mandatory for HiveMQ Cloud
-        client.on_connect = on_connect
-        client.on_message = on_message
-        
-        # Connect and start background loop
-        client.connect(BROKER, 8883, keepalive=60)
-        client.subscribe(TOPIC)
-        client.loop_start()
-        
-        st.session_state.mqtt_client = client
-    except Exception as e:
-        st.session_state.conn_log = f"⚠️ Setup Error: {str(e)}"
+# --- MAIN LOGIC ---
+st.title("Industrial Dashboard")
+st.subheader(f"Status: {st.session_state.status}")
 
-# --- UI ---
-st.title("🏭 Factory Monitor")
-st.info(f"Status: {st.session_state.conn_log}")
+@st.cache_resource
+def get_client():
+    c = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+    c.username_pw_set(U, P)
+    c.tls_set()
+    c.on_connect = on_connect
+    c.on_message = on_message
+    c.connect(B, 8883)
+    c.subscribe("hive/a")
+    c.loop_start()
+    return c
 
-if st.session_state.last_received:
-    data = st.session_state.last_received
-    cols = st.columns(len(data))
-    for i, (k, v) in enumerate(data.items()):
-        cols[i].metric(label=k.upper(), value=v)
+client = get_client()
+
+# --- DISPLAY ---
+if st.session_state.data:
+    st.write("### Live Metrics")
+    st.json(st.session_state.data) # Show raw JSON first to prove it's working
 else:
-    st.warning("Connected, but waiting for data on 'hive/a'...")
+    st.info("Waiting for first message from Node-RED...")
 
-# Fast refresh to catch the 'on_connect' update
 time.sleep(2)
 st.rerun()
