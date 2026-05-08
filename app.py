@@ -5,10 +5,10 @@ import time
 
 # --- CONFIG ---
 # Best Practice: Use st.secrets if deploying to the cloud
-BROKER = st.secrets["3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"]
+BROKER = st.secrets["BROKER"]
 PORT = 8883
-USER = st.secrets["user2"]
-PASS = st.secrets["ServerClaude#1"]
+USER = st.secrets["USER"]
+PASS = st.secrets["PASS"]
 TOPIC = "hive/a"
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
