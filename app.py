@@ -2,76 +2,65 @@ import streamlit as st
 import paho.mqtt.client as mqtt
 import json
 import time
-import certifi
+import ssl
 
-# --- 1. PULL CREDENTIALS FROM SECRETS ---
-try:
-    B = st.secrets["BROKER"]
-    U = st.secrets["USER"]
-    P = st.secrets["PASS"]
-except Exception as e:
-    st.error(f"Secrets Error: {e}")
-    st.stop()
+# --- 1. SECRETS ---
+B = st.secrets["BROKER"]
+U = st.secrets["USER"]
+P = st.secrets["PASS"]
 
-# --- 2. INITIALIZE SESSION STATE ---
-if "data" not in st.session_state:
-    st.session_state.data = {}
-if "status" not in st.session_state:
-    st.session_state.status = "Connecting..."
+# --- 2. STATE ---
+if "data" not in st.session_state: st.session_state.data = {}
+if "status" not in st.session_state: st.session_state.status = "Initializing..."
 
-# --- 3. MQTT CALLBACKS ---
+# --- 3. CALLBACKS ---
 def on_connect(client, userdata, flags, rc, props=None):
     if rc == 0:
         st.session_state.status = "✅ CONNECTED"
+        client.subscribe("hive/a")
     else:
-        st.session_state.status = f"❌ CONNECTION FAILED (RC: {rc})"
+        st.session_state.status = f"❌ REFUSED (RC: {rc})"
 
 def on_message(client, userdata, msg):
     try:
-        raw_payload = msg.payload.decode().strip()
-        # Clean stringified JSON if needed
-        if raw_payload.startswith('"') and raw_payload.endswith('"'):
-            raw_payload = raw_payload[1:-1]
-        st.session_state.data = json.loads(raw_payload)
-    except Exception as e:
-        st.session_state.data = {"Error": str(e), "Raw": msg.payload.decode()}
+        st.session_state.data = json.loads(msg.payload.decode())
+    except:
+        st.session_state.data = {"Raw": msg.payload.decode()}
 
-# --- 4. MQTT CLIENT (CACHED) ---
+# --- 4. THE CONNECTION ---
 @st.cache_resource
-def get_mqtt_client():
+def get_mqtt():
     c = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
     c.username_pw_set(U, P)
-    c.tls_set(ca_certs=certifi.where()) # Uses certifi to handle SSL
+    
+    # Force basic TLS 1.2+ encryption (required for HiveMQ Cloud)
+    context = ssl.create_default_context()
+    c.tls_set_context(context)
+    
     c.on_connect = on_connect
     c.on_message = on_message
     
     try:
-        c.connect(B, 8883, keepalive=60)
-        c.subscribe("hive/a")
+        # Added a 5-second timeout so it doesn't "Hang" forever
+        c.connect(B, 8883, keepalive=60, bind_address="", bind_port=0, clean_start=True)
         c.loop_start()
         return c
     except Exception as e:
-        st.error(f"Network Error: {e}")
+        st.session_state.status = f"⚠️ Connection Error: {str(e)}"
         return None
 
-# Trigger the connection
-mqtt_client = get_mqtt_client()
+get_mqtt()
 
-# --- 5. DASHBOARD UI ---
-st.title("🏭 Factory Real-Time Monitor")
+# --- 5. UI ---
+st.title("🏭 Factory Monitor")
 st.subheader(f"System Status: {st.session_state.status}")
 
 if st.session_state.data:
-    # This automatically creates columns for Voltage, Current, etc.
-    metrics = st.session_state.data
-    cols = st.columns(len(metrics))
-    
-    for i, (key, value) in enumerate(metrics.items()):
-        with cols[i]:
-            st.metric(label=key.upper(), value=value)
+    cols = st.columns(len(st.session_state.data))
+    for i, (k, v) in enumerate(st.session_state.data.items()):
+        cols[i].metric(label=k.upper(), value=v)
 else:
-    st.info("📡 Waiting for data from Node-RED... Make sure all 3 inputs are triggered.")
+    st.info("Waiting for data... Please trigger Node-RED.")
 
-# --- 6. AUTO-REFRESH ---
 time.sleep(2)
 st.rerun()
