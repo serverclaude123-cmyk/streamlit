@@ -19,7 +19,7 @@ WIB          = timezone(timedelta(hours=7))
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
 
-# --- 2. SUPABASE CLIENT ---
+# --- 2. SUPABASE CLIENT (read-only display) ---
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -27,33 +27,11 @@ def get_supabase() -> Client:
 supabase = get_supabase()
 
 # --- 3. SESSION STATE ---
-if "data"               not in st.session_state: st.session_state.data = {}
-if "status"             not in st.session_state: st.session_state.status = "Connecting..."
-if "msg_queue"          not in st.session_state: st.session_state.msg_queue = queue.Queue()
-if "last_logged_minute" not in st.session_state: st.session_state.last_logged_minute = None
+if "data"      not in st.session_state: st.session_state.data = {}
+if "status"    not in st.session_state: st.session_state.status = "Connecting..."
+if "msg_queue" not in st.session_state: st.session_state.msg_queue = queue.Queue()
 
-# --- 4. SUPABASE LOGGING (JSONB) ---
-def log_to_supabase(data: dict):
-    """Store all fields as a single JSONB blob — works with any column names."""
-    now_str = datetime.now(WIB).isoformat()
-
-    # Convert all values to float where possible
-    clean = {}
-    for k, v in data.items():
-        if k == "timestamp":
-            continue
-        try:
-            clean[k] = float(v)
-        except (ValueError, TypeError):
-            clean[k] = str(v)
-
-    row = {"timestamp": now_str, "data": clean}
-    try:
-        supabase.table(TABLE).insert(row).execute()
-    except Exception as e:
-        st.session_state.status = f"⚠️ DB Error: {e}"
-
-# --- 5. MQTT CALLBACKS ---
+# --- 4. MQTT CALLBACKS ---
 def on_connect(client, userdata, flags, rc, props=None):
     if rc == 0:
         st.session_state.status = "✅ CONNECTED"
@@ -74,7 +52,7 @@ def on_message(client, userdata, msg):
     except Exception as e:
         userdata["queue"].put({"Raw": msg.payload.decode(), "Error": str(e)})
 
-# --- 6. MQTT CONNECTION ---
+# --- 5. MQTT CONNECTION ---
 if "mqtt_client" not in st.session_state:
     try:
         msg_q = st.session_state.msg_queue
@@ -93,7 +71,7 @@ if "mqtt_client" not in st.session_state:
     except Exception as e:
         st.session_state.status = f"⚠️ Setup Error: {e}"
 
-# --- 7. DRAIN QUEUE + LOG EVERY 1 MINUTE ---
+# --- 6. DRAIN QUEUE (display only, no logging here) ---
 try:
     while True:
         new_data = st.session_state.msg_queue.get_nowait()
@@ -101,15 +79,8 @@ try:
 except queue.Empty:
     pass
 
-if st.session_state.data:
-    current_minute = datetime.now(WIB).strftime("%Y-%m-%d %H:%M")
-    if current_minute != st.session_state.last_logged_minute:
-        log_to_supabase(st.session_state.data)
-        st.session_state.last_logged_minute = current_minute
-
-# --- 8. HELPER: flatten JSONB rows into a DataFrame ---
+# --- 7. HELPER: flatten JSONB rows into DataFrame ---
 def rows_to_df(rows: list) -> pd.DataFrame:
-    """Expand the JSONB 'data' column into individual columns."""
     records = []
     for row in rows:
         flat = {"timestamp": row["timestamp"]}
@@ -121,7 +92,7 @@ def rows_to_df(rows: list) -> pd.DataFrame:
         df["timestamp"] = df["timestamp"].dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S")
     return df
 
-# --- 9. UI ---
+# --- 8. UI ---
 st.title("🏭 Factory Monitor")
 st.subheader(f"System Status: {st.session_state.status}")
 
@@ -168,7 +139,6 @@ with tab_log:
 
     if "log_df" in st.session_state and not st.session_state.log_df.empty:
         df = st.session_state.log_df
-
         col_info, col_dl = st.columns([3, 1])
         col_info.markdown(f"**{len(df)} records** found")
         col_dl.download_button(
@@ -186,8 +156,6 @@ with tab_chart:
     st.markdown("### 📈 Parameter Trend")
 
     col_p, col_range = st.columns([2, 2])
-
-    # Build param list from live data
     param_options = [k for k in st.session_state.data.keys()
                      if k not in ("timestamp", "id", "Error", "Raw")]
     if not param_options:
@@ -218,7 +186,6 @@ with tab_chart:
                 .execute()
             )
             chart_df = rows_to_df(result.data)
-
             if not chart_df.empty and selected_param in chart_df.columns:
                 chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"])
                 chart_df = chart_df.set_index("timestamp")
@@ -231,6 +198,6 @@ with tab_chart:
         except Exception as e:
             st.error(f"Chart query failed: {e}")
 
-# --- 10. AUTO-REFRESH ---
+# --- 9. AUTO-REFRESH ---
 time.sleep(2)
 st.rerun()
