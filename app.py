@@ -4,6 +4,7 @@ import json
 import time
 import ssl
 import queue
+from datetime import datetime, timezone, timedelta
 
 # --- 1. CONFIG ---
 B = st.secrets["BROKER"]
@@ -98,7 +99,8 @@ if st.session_state.data:
 else:
     st.info("⏳ Waiting for data... Make sure Node-RED Join node is sending JSON to 'hive/a'.")
 
-st.caption(f"Last updated: {time.strftime('%H:%M:%S')}")
+jakarta_time = datetime.now(timezone(timedelta(hours=7))).strftime('%H:%M:%S')
+st.caption(f"Last updated: {jakarta_time} WIB")
 
 # --- 7. AUTO-REFRESH ---
 time.sleep(2)
