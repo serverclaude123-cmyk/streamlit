@@ -33,31 +33,23 @@ if "msg_queue" not in st.session_state: st.session_state.msg_queue = queue.Queue
 
 # --- 4. KEY CLEANER (mirrors Node-RED logic) ---
 def clean_key(k: str) -> str:
-    """Replace / and spaces with _ to match Node-RED cleaned keys."""
     return k.replace("/", "_").replace(" ", "_")
 
 def clean_data(data: dict) -> dict:
     return {clean_key(k): v for k, v in data.items()}
 
-# --- 5. LABEL + UNIT MAPPING ---
-# Add your actual parameter names here (after cleaning)
-LABEL_MAP = {
-    "voltage":   ("Voltage",   "V"),
-    "SABDA_IR":  ("Current R", "mA"),
-    "SABDA_IS":  ("Current S", "mA"),
-    "SABDA_IT":  ("Current T", "mA"),
-    "power":     ("Power",     "W"),
-    "frequency": ("Frequency", "Hz"),
-    "pf":        ("Power Factor", ""),
-    "energy":    ("Energy",    "kWh"),
+# --- 5. DYNAMIC LABEL HELPER ---
+# No hardcoded map — labels are derived from the key name itself.
+# Optionally, you can still override specific keys here:
+LABEL_OVERRIDES = {
+    # "voltage": ("Voltage", "V"),   # example override
 }
 
 def get_label(key: str):
-    if key in LABEL_MAP:
-        label, unit = LABEL_MAP[key]
-    else:
-        label = key.replace("_", " ").title()
-        unit  = ""
+    if key in LABEL_OVERRIDES:
+        return LABEL_OVERRIDES[key]
+    label = key.replace("_", " ").title()
+    unit  = ""
     return label, unit
 
 # --- 6. MQTT CALLBACKS ---
@@ -108,20 +100,35 @@ try:
 except queue.Empty:
     pass
 
-# --- 9. HELPER: flatten JSONB rows ---
+# --- 9. DYNAMIC rows_to_df ---
+# Fully dynamic: discovers all keys inside the JSONB `data` field automatically.
+# Works regardless of how many fields Node-RED sends — no schema changes needed.
 def rows_to_df(rows: list) -> pd.DataFrame:
     records = []
     for row in rows:
-        flat = {"timestamp": row["timestamp"]}
-        flat.update({clean_key(k): v for k, v in row.get("data", {}).items()})
+        flat = {"timestamp": row.get("timestamp", "")}
+        # `data` field is a JSONB dict — flatten all keys dynamically
+        payload = row.get("data", {})
+        if isinstance(payload, dict):
+            for k, v in payload.items():
+                flat[clean_key(k)] = v
         records.append(flat)
+
     df = pd.DataFrame(records)
+
     if "timestamp" in df.columns:
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True, errors="coerce")
         df["timestamp"] = df["timestamp"].dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S")
+
     return df
 
-# --- 10. UI ---
+# --- 10. DISCOVER PARAM COLUMNS from a DataFrame ---
+# Returns all columns except metadata ones, so the UI adapts automatically.
+def get_param_columns(df: pd.DataFrame) -> list:
+    skip = {"timestamp", "id", "Error", "Raw"}
+    return [c for c in df.columns if c not in skip]
+
+# --- 11. UI ---
 st.title("🏭 Factory Monitor")
 st.subheader(f"System Status: {st.session_state.status}")
 
@@ -134,7 +141,7 @@ with tab_live:
                  if k not in ("timestamp", "Error", "Raw")]
         cols = st.columns(min(len(items), 4))
         for i, (k, v) in enumerate(items):
-            col   = cols[i % len(cols)]
+            col = cols[i % len(cols)]
             label, unit = get_label(k)
             try:
                 col.metric(label=label, value=f"{float(v):.2f} {unit}".strip())
@@ -165,9 +172,14 @@ with tab_log:
                 .execute()
             )
             df = rows_to_df(result.data)
-            # Rename columns using label map
-            df = df.rename(columns={k: f"{v[0]} ({v[1]})" if v[1] else v[0]
-                                    for k, v in LABEL_MAP.items()})
+
+            # ✅ DYNAMIC: rename columns using get_label — works for any number of fields
+            rename_map = {}
+            for col in get_param_columns(df):
+                label, unit = get_label(col)
+                rename_map[col] = f"{label} ({unit})" if unit else label
+            df = df.rename(columns=rename_map)
+
             st.session_state.log_df = df
         except Exception as e:
             st.error(f"Query failed: {e}")
@@ -175,7 +187,8 @@ with tab_log:
     if "log_df" in st.session_state and not st.session_state.log_df.empty:
         df = st.session_state.log_df
         col_info, col_dl = st.columns([3, 1])
-        col_info.markdown(f"**{len(df)} records** found")
+        col_info.markdown(f"**{len(df)} records** found  \n"
+                          f"**{len(df.columns) - 1} parameters** detected")
         col_dl.download_button(
             label="⬇️ Download CSV",
             data=df.to_csv(index=False).encode(),
@@ -191,16 +204,6 @@ with tab_chart:
     st.markdown("### 📈 Parameter Trend")
 
     col_p, col_range = st.columns([2, 2])
-    param_options = [k for k in st.session_state.data.keys()
-                     if k not in ("timestamp", "id", "Error", "Raw")]
-    if not param_options:
-        param_options = ["— no live data yet —"]
-
-    # Show friendly labels in dropdown
-    param_labels = {k: get_label(k)[0] for k in param_options}
-    selected_label = col_p.selectbox("Parameter", list(param_labels.values()))
-    selected_param = next((k for k, v in param_labels.items() if v == selected_label),
-                          param_options[0])
 
     time_range = col_range.selectbox("Range", [
         "Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days"
@@ -214,7 +217,40 @@ with tab_chart:
     }
     from_time = (datetime.now(WIB) - range_map[time_range]).isoformat()
 
-    if st.button("📊 Load Chart") and selected_param != "— no live data yet —":
+    # ✅ DYNAMIC: load a small sample first to discover available columns
+    @st.cache_data(ttl=30)
+    def get_available_params(from_ts: str) -> list:
+        try:
+            result = (
+                supabase.table(TABLE)
+                .select("data")
+                .gte("timestamp", from_ts)
+                .limit(1)
+                .execute()
+            )
+            if result.data:
+                payload = result.data[0].get("data", {})
+                if isinstance(payload, dict):
+                    return sorted([clean_key(k) for k in payload.keys()])
+        except Exception:
+            pass
+        return []
+
+    # Merge live keys + db keys so dropdown is always populated
+    live_keys = [k for k in st.session_state.data.keys()
+                 if k not in ("timestamp", "id", "Error", "Raw")]
+    db_keys   = get_available_params(from_time)
+    all_params = sorted(set(live_keys + db_keys)) or ["— no data yet —"]
+
+    # Show friendly labels in dropdown
+    param_labels = {k: get_label(k)[0] for k in all_params}
+    selected_label = col_p.selectbox("Parameter", list(param_labels.values()))
+    selected_param = next(
+        (k for k, v in param_labels.items() if v == selected_label),
+        all_params[0]
+    )
+
+    if st.button("📊 Load Chart") and selected_param != "— no data yet —":
         try:
             result = (
                 supabase.table(TABLE)
@@ -225,8 +261,9 @@ with tab_chart:
                 .execute()
             )
             chart_df = rows_to_df(result.data)
+
             if not chart_df.empty and selected_param in chart_df.columns:
-                chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"])
+                chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], errors="coerce")
                 chart_df = chart_df.set_index("timestamp")
                 chart_df[selected_param] = pd.to_numeric(
                     chart_df[selected_param], errors="coerce"
@@ -234,11 +271,23 @@ with tab_chart:
                 label, unit = get_label(selected_param)
                 st.markdown(f"**{label}** {'(' + unit + ')' if unit else ''}")
                 st.line_chart(chart_df[[selected_param]])
+
+                # Show summary stats dynamically
+                s = chart_df[selected_param].dropna()
+                if not s.empty:
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric("Min",  f"{s.min():.2f}")
+                    c2.metric("Max",  f"{s.max():.2f}")
+                    c3.metric("Mean", f"{s.mean():.2f}")
+                    c4.metric("Std",  f"{s.std():.2f}")
             else:
-                st.warning(f"No data found for '{selected_label}' in this range.")
+                st.warning(
+                    f"No data found for **{selected_label}** in this range. "
+                    f"Available columns: {', '.join(get_param_columns(chart_df))}"
+                )
         except Exception as e:
             st.error(f"Chart query failed: {e}")
 
-# --- 11. AUTO-REFRESH ---
+# --- 12. AUTO-REFRESH ---
 time.sleep(2)
 st.rerun()
