@@ -9,9 +9,9 @@ from supabase import create_client, Client
 import pandas as pd
 
 # --- 1. CONFIG ---
-B             = st.secrets["3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"]
-U             = st.secrets["user2"]
-P             = st.secrets["ServerClaude#1"]
+BROKER = st.secrets["3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"]
+USER = st.secrets["user2"]
+PASS  = st.secrets["ServerClaude#1"]
 SUPABASE_URL  = st.secrets["Shttps://mxorqtwurxzeqpydcqbw.supabase.co"]
 SUPABASE_KEY  = st.secrets["sb_publishable_J3AGPX79fZR9Dr8SPMRBXg_npyuutZn"]
 TABLE         = "electrical_log"
