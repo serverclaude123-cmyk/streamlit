@@ -2,3 +2,4 @@ streamlit
 paho-mqtt
 certifi
 pandas
+superbase
