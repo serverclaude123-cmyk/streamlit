@@ -9,11 +9,11 @@ from supabase import create_client, Client
 import pandas as pd
 
 # --- 1. CONFIG ---
-B            = st.secrets["BROKER"]        # your HiveMQ broker URL
-U            = st.secrets["USER"]          # your HiveMQ username
-P            = st.secrets["PASS"]          # your HiveMQ password
-SUPABASE_URL = st.secrets["SUPABASE_URL"]  # https://xxxx.supabase.co
-SUPABASE_KEY = st.secrets["SUPABASE_KEY"]  # your anon/public key
+B            = st.secrets["BROKER"]
+U            = st.secrets["USER"]
+P            = st.secrets["PASS"]
+SUPABASE_URL = st.secrets["SUPABASE_URL"]
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]
 TABLE        = "electrical_log"
 WIB          = timezone(timedelta(hours=7))
 
@@ -32,17 +32,22 @@ if "status"             not in st.session_state: st.session_state.status = "Conn
 if "msg_queue"          not in st.session_state: st.session_state.msg_queue = queue.Queue()
 if "last_logged_minute" not in st.session_state: st.session_state.last_logged_minute = None
 
-# --- 4. SUPABASE LOGGING ---
+# --- 4. SUPABASE LOGGING (JSONB) ---
 def log_to_supabase(data: dict):
+    """Store all fields as a single JSONB blob — works with any column names."""
     now_str = datetime.now(WIB).isoformat()
-    row = {"timestamp": now_str}
+
+    # Convert all values to float where possible
+    clean = {}
     for k, v in data.items():
         if k == "timestamp":
             continue
         try:
-            row[k] = float(v)
+            clean[k] = float(v)
         except (ValueError, TypeError):
-            row[k] = str(v)
+            clean[k] = str(v)
+
+    row = {"timestamp": now_str, "data": clean}
     try:
         supabase.table(TABLE).insert(row).execute()
     except Exception as e:
@@ -78,11 +83,11 @@ if "mqtt_client" not in st.session_state:
             protocol=mqtt.MQTTv311,
             userdata={"queue": msg_q}
         )
-        c.username_pw_set(U, P)          # ← U and P correctly used here
+        c.username_pw_set(U, P)
         c.tls_set_context(ssl.create_default_context())
         c.on_connect = on_connect
         c.on_message = on_message
-        c.connect(B, 8883, keepalive=60) # ← B correctly used here
+        c.connect(B, 8883, keepalive=60)
         c.loop_start()
         st.session_state.mqtt_client = c
     except Exception as e:
@@ -102,7 +107,21 @@ if st.session_state.data:
         log_to_supabase(st.session_state.data)
         st.session_state.last_logged_minute = current_minute
 
-# --- 8. UI ---
+# --- 8. HELPER: flatten JSONB rows into a DataFrame ---
+def rows_to_df(rows: list) -> pd.DataFrame:
+    """Expand the JSONB 'data' column into individual columns."""
+    records = []
+    for row in rows:
+        flat = {"timestamp": row["timestamp"]}
+        flat.update(row.get("data", {}))
+        records.append(flat)
+    df = pd.DataFrame(records)
+    if "timestamp" in df.columns:
+        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
+        df["timestamp"] = df["timestamp"].dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S")
+    return df
+
+# --- 9. UI ---
 st.title("🏭 Factory Monitor")
 st.subheader(f"System Status: {st.session_state.status}")
 
@@ -136,21 +155,19 @@ with tab_log:
         try:
             result = (
                 supabase.table(TABLE)
-                .select("*")
+                .select("timestamp, data")
                 .gte("timestamp", f"{date_from}T00:00:00+07:00")
                 .lte("timestamp", f"{date_to}T23:59:59+07:00")
                 .order("timestamp", desc=True)
                 .limit(5000)
                 .execute()
             )
-            st.session_state.log_df = pd.DataFrame(result.data)
+            st.session_state.log_df = rows_to_df(result.data)
         except Exception as e:
             st.error(f"Query failed: {e}")
 
     if "log_df" in st.session_state and not st.session_state.log_df.empty:
-        df = st.session_state.log_df.copy()
-        df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
-        df["timestamp"] = df["timestamp"].dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S")
+        df = st.session_state.log_df
 
         col_info, col_dl = st.columns([3, 1])
         col_info.markdown(f"**{len(df)} records** found")
@@ -160,7 +177,7 @@ with tab_log:
             file_name=f"electrical_log_{date_from}_{date_to}.csv",
             mime="text/csv"
         )
-        st.dataframe(df.drop(columns=["id"], errors="ignore"), use_container_width=True, hide_index=True)
+        st.dataframe(df, use_container_width=True, hide_index=True)
     else:
         st.info("Select a date range and click Load.")
 
@@ -169,12 +186,17 @@ with tab_chart:
     st.markdown("### 📈 Parameter Trend")
 
     col_p, col_range = st.columns([2, 2])
-    param_options = [k for k in st.session_state.data.keys() if k not in ("timestamp", "id", "Error", "Raw")]
+
+    # Build param list from live data
+    param_options = [k for k in st.session_state.data.keys()
+                     if k not in ("timestamp", "id", "Error", "Raw")]
     if not param_options:
-        param_options = ["voltage", "current", "power"]
+        param_options = ["— no live data yet —"]
 
     selected_param = col_p.selectbox("Parameter", param_options)
-    time_range     = col_range.selectbox("Range", ["Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days"])
+    time_range     = col_range.selectbox("Range", [
+        "Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days"
+    ])
 
     range_map = {
         "Last 1 hour":   timedelta(hours=1),
@@ -185,28 +207,30 @@ with tab_chart:
     }
     from_time = (datetime.now(WIB) - range_map[time_range]).isoformat()
 
-    if st.button("📊 Load Chart"):
+    if st.button("📊 Load Chart") and selected_param != "— no live data yet —":
         try:
             result = (
                 supabase.table(TABLE)
-                .select(f"timestamp,{selected_param}")
+                .select("timestamp, data")
                 .gte("timestamp", from_time)
                 .order("timestamp", desc=False)
                 .limit(10000)
                 .execute()
             )
-            chart_df = pd.DataFrame(result.data)
+            chart_df = rows_to_df(result.data)
+
             if not chart_df.empty and selected_param in chart_df.columns:
-                chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"], utc=True)
-                chart_df["timestamp"] = chart_df["timestamp"].dt.tz_convert(WIB)
+                chart_df["timestamp"] = pd.to_datetime(chart_df["timestamp"])
                 chart_df = chart_df.set_index("timestamp")
-                chart_df[selected_param] = pd.to_numeric(chart_df[selected_param], errors="coerce")
+                chart_df[selected_param] = pd.to_numeric(
+                    chart_df[selected_param], errors="coerce"
+                )
                 st.line_chart(chart_df[[selected_param]])
             else:
-                st.warning("No data found for this range.")
+                st.warning(f"No data found for '{selected_param}' in this range.")
         except Exception as e:
             st.error(f"Chart query failed: {e}")
 
-# --- 9. AUTO-REFRESH ---
+# --- 10. AUTO-REFRESH ---
 time.sleep(2)
 st.rerun()
