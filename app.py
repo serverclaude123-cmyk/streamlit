@@ -81,11 +81,11 @@ if "mqtt_client" not in st.session_state:
             protocol=mqtt.MQTTv311,
             userdata={"queue": msg_q}
         )
-        c.username_pw_set(U, P)
+        c.username_pw_set(USER, PASS)
         c.tls_set_context(ssl.create_default_context())
         c.on_connect = on_connect
         c.on_message = on_message
-        c.connect(B, 8883, keepalive=60)
+        c.connect(BROKER, 8883, keepalive=60)
         c.loop_start()
         st.session_state.mqtt_client = c
     except Exception as e:
