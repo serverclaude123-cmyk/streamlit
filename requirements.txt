@@ -2,4 +2,4 @@ streamlit
 paho-mqtt
 certifi
 pandas
-supabase-py
+supabase
