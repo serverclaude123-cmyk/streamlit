@@ -9,17 +9,17 @@ from supabase import create_client, Client
 import pandas as pd
 
 # --- 1. CONFIG ---
-BROKER = st.secrets["3cc93849ba9e403dba00237c7cc4cb5e.s1.eu.hivemq.cloud"]
-USER = st.secrets["user2"]
-PASS  = st.secrets["ServerClaude#1"]
-SUPABASE_URL  = st.secrets["Shttps://mxorqtwurxzeqpydcqbw.supabase.co"]
-SUPABASE_KEY  = st.secrets["sb_publishable_J3AGPX79fZR9Dr8SPMRBXg_npyuutZn"]
-TABLE         = "electrical_log"
-WIB           = timezone(timedelta(hours=7))
+B            = st.secrets["BROKER"]        # your HiveMQ broker URL
+U            = st.secrets["USER"]          # your HiveMQ username
+P            = st.secrets["PASS"]          # your HiveMQ password
+SUPABASE_URL = st.secrets["SUPABASE_URL"]  # https://xxxx.supabase.co
+SUPABASE_KEY = st.secrets["SUPABASE_KEY"]  # your anon/public key
+TABLE        = "electrical_log"
+WIB          = timezone(timedelta(hours=7))
 
 st.set_page_config(page_title="Industrial Monitor", layout="wide")
 
-# --- 2. SUPABASE CLIENT (cached — one instance for the session) ---
+# --- 2. SUPABASE CLIENT ---
 @st.cache_resource
 def get_supabase() -> Client:
     return create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -34,10 +34,8 @@ if "last_logged_minute" not in st.session_state: st.session_state.last_logged_mi
 
 # --- 4. SUPABASE LOGGING ---
 def log_to_supabase(data: dict):
-    """Insert one row into Supabase with WIB timestamp."""
     now_str = datetime.now(WIB).isoformat()
     row = {"timestamp": now_str}
-
     for k, v in data.items():
         if k == "timestamp":
             continue
@@ -45,7 +43,6 @@ def log_to_supabase(data: dict):
             row[k] = float(v)
         except (ValueError, TypeError):
             row[k] = str(v)
-
     try:
         supabase.table(TABLE).insert(row).execute()
     except Exception as e:
@@ -81,11 +78,11 @@ if "mqtt_client" not in st.session_state:
             protocol=mqtt.MQTTv311,
             userdata={"queue": msg_q}
         )
-        c.username_pw_set(USER, PASS)
+        c.username_pw_set(U, P)          # ← U and P correctly used here
         c.tls_set_context(ssl.create_default_context())
         c.on_connect = on_connect
         c.on_message = on_message
-        c.connect(BROKER, 8883, keepalive=60)
+        c.connect(B, 8883, keepalive=60) # ← B correctly used here
         c.loop_start()
         st.session_state.mqtt_client = c
     except Exception as e:
@@ -131,7 +128,6 @@ with tab_live:
 with tab_log:
     st.markdown("### 📋 Logged Records")
 
-    # Date range filter
     col_from, col_to, col_fetch = st.columns([2, 2, 1])
     date_from = col_from.date_input("From", value=datetime.now(WIB).date())
     date_to   = col_to.date_input("To",   value=datetime.now(WIB).date())
@@ -153,8 +149,6 @@ with tab_log:
 
     if "log_df" in st.session_state and not st.session_state.log_df.empty:
         df = st.session_state.log_df.copy()
-
-        # Convert timestamp to WIB-readable string
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
         df["timestamp"] = df["timestamp"].dt.tz_convert(WIB).dt.strftime("%Y-%m-%d %H:%M:%S")
 
@@ -175,11 +169,9 @@ with tab_chart:
     st.markdown("### 📈 Parameter Trend")
 
     col_p, col_range = st.columns([2, 2])
-
-    # Build column list from live data keys (excluding timestamp/id)
     param_options = [k for k in st.session_state.data.keys() if k not in ("timestamp", "id", "Error", "Raw")]
     if not param_options:
-        param_options = ["voltage", "current", "power"]   # fallback defaults
+        param_options = ["voltage", "current", "power"]
 
     selected_param = col_p.selectbox("Parameter", param_options)
     time_range     = col_range.selectbox("Range", ["Last 1 hour", "Last 6 hours", "Last 24 hours", "Last 7 days", "Last 30 days"])
@@ -191,8 +183,7 @@ with tab_chart:
         "Last 7 days":   timedelta(days=7),
         "Last 30 days":  timedelta(days=30),
     }
-    delta     = range_map[time_range]
-    from_time = (datetime.now(WIB) - delta).isoformat()
+    from_time = (datetime.now(WIB) - range_map[time_range]).isoformat()
 
     if st.button("📊 Load Chart"):
         try:
